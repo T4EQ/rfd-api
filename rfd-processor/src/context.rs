@@ -5,6 +5,10 @@
 use std::{io::Cursor, time::Duration};
 
 use async_trait::async_trait;
+use aws_sdk_s3::{
+    config::{BehaviorVersion, Credentials as AwsCredentials, Region},
+    primitives::ByteStream,
+};
 use google_drive3::{api::File, hyper_util::rt::TokioExecutor, DriveHub};
 // use google_drive::{traits::FileOps, Client as GDriveClient};
 use google_storage1::{
@@ -187,68 +191,140 @@ pub struct GitHubCtx {
 }
 
 pub struct StaticAssetStorageCtx {
-    pub client: Storage<HttpsConnector<HttpConnector>>,
     pub locations: Vec<StaticAssetLocation>,
 }
 
 impl StaticAssetStorageCtx {
     pub async fn new(entries: &[StaticStorageConfig]) -> Result<Self, ContextError> {
-        let opts = yup_oauth2::ApplicationDefaultCredentialsFlowOpts::default();
-        let gcp_auth = match yup_oauth2::ApplicationDefaultCredentialsAuthenticator::builder(opts)
-            .await
-        {
-            yup_oauth2::authenticator::ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => {
-                tracing::debug!("Service account based credentials");
+        let mut gcp_client = None;
+        let mut locations = Vec::with_capacity(entries.len());
 
-                auth.build().await.map_err(|err| {
-                    tracing::error!(
-                        ?err,
-                        "Failed to construct Cloud Storage credentials from service account"
-                    );
-                    ContextError::FailedToFindGcpCredentials(err)
-                })?
+        for entry in entries {
+            match entry {
+                StaticStorageConfig::Gcp(config) => {
+                    let client = match &gcp_client {
+                        Some(client) => client,
+                        None => gcp_client.insert(std::sync::Arc::new(gcp_storage_client().await?)),
+                    };
+                    locations.push(StaticAssetLocation::Gcp {
+                        client: client.clone(),
+                        bucket: config.bucket.clone(),
+                    });
+                }
+                StaticStorageConfig::S3(config) => {
+                    let s3_config = aws_sdk_s3::Config::builder()
+                        .behavior_version(BehaviorVersion::latest())
+                        .endpoint_url(&config.endpoint_url)
+                        .region(Region::new(config.region.clone()))
+                        .credentials_provider(AwsCredentials::new(
+                            &config.access_key_id,
+                            &config.secret_access_key,
+                            None,
+                            None,
+                            "rfd-processor-config",
+                        ))
+                        .force_path_style(config.path_style_access)
+                        .build();
+                    locations.push(StaticAssetLocation::S3 {
+                        client: aws_sdk_s3::Client::from_conf(s3_config),
+                        bucket: config.bucket.clone(),
+                    });
+                }
             }
-            yup_oauth2::authenticator::ApplicationDefaultCredentialsTypes::InstanceMetadata(
-                auth,
-            ) => {
-                tracing::debug!("Create instance based credentials");
+        }
 
-                auth.build().await.map_err(|err| {
-                    tracing::error!(
-                        ?err,
-                        "Failed to construct Cloud Storage credentials from instance metadata"
-                    );
-                    ContextError::FailedToFindGcpCredentials(err)
-                })?
-            }
-        };
-
-        let storage = Storage::new(
-            Client::builder(TokioExecutor::new()).build(
-                HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .unwrap()
-                    .https_only()
-                    .enable_http2()
-                    .build(),
-            ),
-            gcp_auth,
-        );
-
-        Ok(Self {
-            client: storage,
-            locations: entries
-                .iter()
-                .map(|e| StaticAssetLocation {
-                    bucket: e.bucket.to_string(),
-                })
-                .collect(),
-        })
+        Ok(Self { locations })
     }
 }
 
-pub struct StaticAssetLocation {
-    pub bucket: String,
+async fn gcp_storage_client() -> Result<Storage<HttpsConnector<HttpConnector>>, ContextError> {
+    let opts = yup_oauth2::ApplicationDefaultCredentialsFlowOpts::default();
+    let gcp_auth = match yup_oauth2::ApplicationDefaultCredentialsAuthenticator::builder(opts).await
+    {
+        yup_oauth2::authenticator::ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => {
+            tracing::debug!("Service account based credentials");
+
+            auth.build().await.map_err(|err| {
+                tracing::error!(
+                    ?err,
+                    "Failed to construct Cloud Storage credentials from service account"
+                );
+                ContextError::FailedToFindGcpCredentials(err)
+            })?
+        }
+        yup_oauth2::authenticator::ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => {
+            tracing::debug!("Create instance based credentials");
+
+            auth.build().await.map_err(|err| {
+                tracing::error!(
+                    ?err,
+                    "Failed to construct Cloud Storage credentials from instance metadata"
+                );
+                ContextError::FailedToFindGcpCredentials(err)
+            })?
+        }
+    };
+
+    Ok(Storage::new(
+        Client::builder(TokioExecutor::new()).build(
+            HttpsConnectorBuilder::new()
+                .with_native_roots()
+                .unwrap()
+                .https_only()
+                .enable_http2()
+                .build(),
+        ),
+        gcp_auth,
+    ))
+}
+
+pub enum StaticAssetLocation {
+    Gcp {
+        client: std::sync::Arc<Storage<HttpsConnector<HttpConnector>>>,
+        bucket: String,
+    },
+    S3 {
+        client: aws_sdk_s3::Client,
+        bucket: String,
+    },
+}
+
+impl StaticAssetLocation {
+    pub fn bucket(&self) -> &str {
+        match self {
+            Self::Gcp { bucket, .. } | Self::S3 { bucket, .. } => bucket,
+        }
+    }
+
+    pub async fn store(
+        &self,
+        object_name: &str,
+        mime_type: &mime_guess::mime::Mime,
+        data: Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::Gcp { client, bucket } => {
+                client
+                    .objects()
+                    .insert(google_storage1::api::Object::default(), bucket)
+                    .name(object_name)
+                    .upload(Cursor::new(data), mime_type.clone())
+                    .await?;
+            }
+            Self::S3 { client, bucket } => {
+                client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(object_name)
+                    .content_type(mime_type.as_ref())
+                    .body(ByteStream::from(data))
+                    .send()
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub type GDriveClient = DriveHub<HttpsConnector<HttpConnector>>;

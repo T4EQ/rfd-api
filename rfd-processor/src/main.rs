@@ -103,8 +103,27 @@ pub struct GitHubSourceRepo {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct StaticStorageConfig {
+#[serde(untagged)]
+pub enum StaticStorageConfig {
+    S3(S3StaticStorageConfig),
+    Gcp(GcpStaticStorageConfig),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcpStaticStorageConfig {
     pub bucket: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3StaticStorageConfig {
+    pub endpoint_url: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub path_style_access: bool,
+    pub region: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -312,4 +331,33 @@ async fn render_pdf_command(
     std::fs::write(output, pdf.into_inner())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StaticStorageConfig;
+
+    #[test]
+    fn static_storage_config_supports_gcp() {
+        let config: StaticStorageConfig = toml::from_str(r#"bucket = "gcp-assets""#).unwrap();
+
+        assert!(matches!(config, StaticStorageConfig::Gcp(_)));
+    }
+
+    #[test]
+    fn static_storage_config_supports_s3() {
+        let config: StaticStorageConfig = toml::from_str(
+            r#"
+endpoint_url = "https://s3.example.com"
+bucket = "s3-assets"
+access_key_id = "access-key"
+secret_access_key = "secret-key"
+path_style_access = true
+region = "us-east-1"
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(config, StaticStorageConfig::S3(_)));
+    }
 }

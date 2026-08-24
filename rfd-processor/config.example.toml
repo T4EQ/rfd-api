@@ -69,10 +69,18 @@ path = ""
 # Branch to use as the default branch of the repository
 default_branch = ""
 
-# Bucket to push static assets pulled from RFDs to (currently only GCP Storage buckets are supported)
+# GCP Storage bucket to push static assets pulled from RFDs to. The bucket-only form is GCP.
 [[static_storage]]
-# Name of the bucket
-bucket = ""
+bucket = "gcp-assets"
+
+# S3-compatible storage destination. Multiple GCP and S3 destinations may be configured.
+[[static_storage]]
+endpoint_url = "https://s3.example.com"
+bucket = "s3-assets"
+access_key_id = ""
+secret_access_key = ""
+path_style_access = true
+region = "us-east-1"
 
 # Location to store generated PDFs (currently on Google Drive Shared Drives are supported)
 [pdf_storage]

@@ -7,6 +7,7 @@ edition = { workspace = true }
 
 [dependencies]
 async-trait = { workspace = true }
+aws-sdk-s3 = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -41,6 +42,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 v-model = { workspace = true }
 uuid = { workspace = true }
 yup-oauth2 = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }
 
 [build-dependencies]
 build-info = { path = "../build-info" }
